@@ -68,7 +68,7 @@ class NIST_data:
         
         self.__define_transition_type()
         self.raw_data = self.raw_data.dropna()
-        self.raw_data['Ritz'] = self.raw_data['Ritz'].astype(float)
+        self.__Ritz_to_float()
         self.__parse_energies()
         self.__parse_stat_weight()
         self.__parse_levels()
@@ -200,6 +200,14 @@ class NIST_data:
 
         self.full_data['lower_J'] = self.full_data['lower_J'].apply(self.__str_to_float)
         self.full_data['upper_J'] = self.full_data['upper_J'].apply(self.__str_to_float)
+
+    def __Ritz_to_float(self):
+
+        """
+        Converts Ritz wavelength to float values
+        """
+        self.raw_data['Ritz'] = self.raw_data['Ritz'].astype(str)
+        self.raw_data['Ritz'] = self.raw_data['Ritz'].apply(self.__str_to_float)
 
     def __find_all_triplets(self):
         """
@@ -343,6 +351,7 @@ class NIST_data:
         """
         Converts str to float value
         If str contains '/' symbol, then this is interpreted as division.
+        If str contains '+' symbol, it means the calculated Ritz wavelength, not the addition
 
         Args:
             s (str) : string of digits? that may be separated by '/'
@@ -357,6 +366,9 @@ class NIST_data:
         if '/' in s:
             numerator, denominator = s.split('/')
             return float(numerator) / float(denominator)
+        elif '+' in s:
+            wl = s.split('+')
+            return float(wl[0])
         else:
             return float(s)
 
@@ -432,9 +444,6 @@ def main():
 
     data = NIST_data('C II', 300, 35e6)
     data.save_triplets_formated()
-
-
-
 
 
 if __name__ == '__main__':
