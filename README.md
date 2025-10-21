@@ -16,6 +16,8 @@ Based on the work of [Rumenskikh et al. 2025](https://doi.org/10.1093/mnras/staf
 - In the triplet transition observed, the wavelength difference between at least two transitions must exceed 0.8 $\AA$ for them to be resolved by a spectrograph.
 - To enable observation using telescopes, we chose a search range from 500 nm to 1500 nm.
 
+The **lines_found/** folder contains the results of the script for elements up to **iron** and ionization level **III**.
+
 ---
 
 ## Features
@@ -60,7 +62,7 @@ data.save_triplets_formated()
 For output see `triplets_data_He I.dat` file.
 
 **Important**
-The script returns all wavelengths in vacuum in angstroms. Please keep this in mind when comparing with NIST.
+The script returns all **Ritz** wavelengths in vacuum in angstroms. Please keep this in mind when comparing with NIST.
 
 ---
 

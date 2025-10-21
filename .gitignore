@@ -5,3 +5,7 @@
 !*.py
 !*.md
 !triplets_data_He I.dat
+
+# include entire folder "lines_found" with all contents
+!lines_found/
+!lines_found/**
