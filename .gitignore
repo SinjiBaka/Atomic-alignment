@@ -1,0 +1,6 @@
+# ignore all
+*
+# but not these
+!.gitignore
+!*.py
+!triplets_data_He I.dat
