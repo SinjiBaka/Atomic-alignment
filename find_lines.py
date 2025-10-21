@@ -61,6 +61,13 @@ class NIST_data:
                                  linename= linename, energy_level_unit='eV')
         
         self.raw_data = nist_table.to_pandas()
+        
+        self.to_save = True
+        if self.raw_data['Ritz'].isna().all():
+            print(f"\nNo data found for the {self.line} in NIST!")
+            self.to_save = False
+            return
+
         self.raw_data = self.raw_data[['Ritz','Aki', 'fik', 'Ei           Ek', 'Lower level', 'Upper level', 'gi   gk', 'Type']]
 
         
@@ -378,6 +385,11 @@ class NIST_data:
         Saves full NIST data for line choosen exlude unresolved lines
         or transitions without crutial information
         """
+
+        if not self.to_save:
+            print("Noting to save!")
+            return
+
         self.full_data.to_csv(f"full_data_{self.line}.dat", sep = "\t", index = False, na_rep = 'NaN')
         print("Full data saved")
 
@@ -386,6 +398,13 @@ class NIST_data:
         """
         Saves triplets found that are subjected to alaignment effect
         """
+        if not self.to_save:
+            print("Noting to save!")
+            return
+        
+        if self.trip_data.empty:
+            print("Noting to save!")
+            return
 
         self.trip_data.to_csv(f"triplets_data_{self.line}.dat", sep = "\t", index = False, na_rep = 'NaN')
         print("Triplets saved")
@@ -396,6 +415,10 @@ class NIST_data:
         Saves triplets found that are subjected to alaignment effect
         in more readable form
         """
+
+        if not self.to_save:
+            print("Noting to save!")
+            return
 
         if self.trip_data.empty:
             print("Noting to save!")
