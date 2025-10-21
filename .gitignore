@@ -3,4 +3,5 @@
 # but not these
 !.gitignore
 !*.py
+!*.md
 !triplets_data_He I.dat
