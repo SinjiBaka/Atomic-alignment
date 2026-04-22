@@ -6,5 +6,7 @@
 !*.md
 
 # include entire folder "lines_found" with all contents
-!lines_found/
-!lines_found/**
+!lines_found_air/
+!lines_found_air/**
+!lines_found_vacuum/
+!lines_found_vacuum/**
