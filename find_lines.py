@@ -20,7 +20,7 @@ class NIST_data:
            time of the triplet lines.
         2. The upper sublevels must have the same electron configuration
             and the same term, but differ in their J moments.
-        3. The search range for lines is 500 - 1500 nm.
+        3. The search range for lines is 500 - 1500 nm (depends on telescope choosen).
         4. The difference between the wavelengths of the lines
            (at least two of them) must exceed 0.8 Angstrom.
         5. The J moment of the lower level is > 1/2.
@@ -37,7 +37,9 @@ class NIST_data:
         data.save_triplets_formated()
     """
 
-    def __init__(self, linename : str, lambda1 : float, lambda2 : float):
+    def __init__(self, linename : str, lambda1 : float, lambda2 : float, in_vacuum : bool = True,
+                 sort_lambda1 : float = 5000.0, sort_lambda2 : float = 15000.0, meta_factor : float = 100.0,
+                  wavelength_sep : float = 0.8 ):
 
         """
         Performs all the basic steps of parsing and filtering
@@ -48,19 +50,32 @@ class NIST_data:
                must be specified to determine the metastability of the lower transition level.
             2) The code does not take into account transitions where lifetime,
                oscillator strength, or term data are missing.
-            3) Wavelengths are given in vacuum units of angstroms.
+            3) Here used Ritz wavelengths.
 
         Args:
             linename (str)  : name of atom or ion (e.g. H I, HeII, Fe VI etc.)
             lambda1 (float) : specifies the start wavelength to load from NIST database in Angstroms
             lambda2 (float) : specifies the finish wavelength to load from NIST database in Angstroms
+            in_vacuum (bool) : store wavelenght in vacuum (True) or in air (False) 
+            lambda1 (float) : wavelength to star filtering with
+            lambda2 (float) : wavelength to end filtering with 
+            meta_factor (float) :  sets the threshold in A for checking metastability
+            wavelength_sep (float) : wavelength separation between any triplet lines in Angstroms
         """
 
         self.line = linename
+
+        if in_vacuum:
+            wavelength_type = 'vacuum'
+        else:
+            wavelength_type = 'vac+air'
+
         nist_table = Nist.query( lambda1 * u.AA, lambda2 * u.AA,
-                                 linename= linename, energy_level_unit='eV')
+                                 linename=linename, energy_level_unit='eV',
+                                 wavelength_type = wavelength_type)
         
         self.raw_data = nist_table.to_pandas()
+        print(len(self.raw_data))
         
         self.to_save = True
         if self.raw_data['Ritz'].isna().all():
@@ -70,11 +85,11 @@ class NIST_data:
 
         self.raw_data = self.raw_data[['Ritz','Aki', 'fik', 'Ei           Ek', 'Lower level', 'Upper level', 'gi   gk', 'Type']]
 
-        
         print(f"\nLoaded\t{len(self.raw_data)} rows for {self.line}")
         
         self.__define_transition_type()
         self.raw_data = self.raw_data.dropna()
+        self.__clear_titles()
         self.__Ritz_to_float()
         self.__parse_energies()
         self.__parse_stat_weight()
@@ -86,11 +101,16 @@ class NIST_data:
 
         print(f"{self.line} data parsed")
 
+        # just for sorting
+        self.triplet_keys = [
+            'lower_conf', 'lower_term', 'lower_J',
+            'upper_conf', 'upper_term']
+
         self.__find_all_triplets()
-        self.__filter_by_wavelength(5000, 15000)
+        self.__filter_by_wavelength(sort_lambda1, sort_lambda2)
         self.__filter_by_J()
-        self.__filter_by_spectral_resolution()
-        self.__filter_metastable_states(factor = 100)
+        self.__filter_by_spectral_resolution(wavelength_sep)
+        self.__filter_metastable_states(factor = meta_factor)
 
         print(f"Data fitered, found {int(len(self.trip_data)/3)} lines")
 
@@ -216,6 +236,9 @@ class NIST_data:
         self.raw_data['Ritz'] = self.raw_data['Ritz'].astype(str)
         self.raw_data['Ritz'] = self.raw_data['Ritz'].apply(self.__str_to_float)
 
+    def __group_triplets(self):
+        return self.trip_data.groupby('triplet_id', group_keys=False)
+
     def __find_all_triplets(self):
         """
         Finds groups (lower_conf, lower_term, lower_J, upper_conf, upper_term)
@@ -223,23 +246,23 @@ class NIST_data:
         only in the J term. Sorts by level and wavelength.
         """
         dupls = self.full_data[self.full_data.duplicated(
-            subset=['lower_conf', 'lower_term', 'lower_J', 'upper_conf', 'upper_term'],
-            keep=False
+        subset=self.triplet_keys,
+        keep=False
         )]
 
         triplets = (
-            dupls.groupby(
-                ['lower_conf', 'lower_term', 'lower_J', 'upper_conf', 'upper_term'],
-                group_keys=False
-            )
+            dupls.groupby(self.triplet_keys, group_keys=False)
             .filter(lambda g: (len(g) == 3) and (g['upper_J'].nunique() == 3))
+            .copy()
         )
 
-        triplets = triplets.sort_values(
-            by=['lower_conf', 'lower_term', 'lower_J', 'upper_conf', 'upper_term', 'Ritz']
-        ).reset_index(drop=True)
+        triplets['triplet_id'] = (
+            triplets.groupby(self.triplet_keys).ngroup()
+        )
 
-        self.trip_data = triplets
+        self.trip_data = triplets.sort_values(
+            by=self.triplet_keys + ['Ritz']
+        ).reset_index(drop=True)
 
     def __filter_by_wavelength(self, lambda1: float, lambda2: float):
 
@@ -253,34 +276,29 @@ class NIST_data:
         Returns:
             DataFrame of lines
         """
-        def triplet_in_range(group):
-            in_range = (group['Ritz'] >= lambda1) & (group['Ritz'] <= lambda2)
-            return in_range.all() and (len(group) == 3)
+        def in_range(g):
+            cond = (g['Ritz'] >= lambda1) & (g['Ritz'] <= lambda2)
+            return cond.all() and len(g) == 3
 
-        grouped = self.trip_data.groupby(
-            ['lower_conf', 'lower_term', 'lower_J', 'upper_conf', 'upper_term'],
-            group_keys=False
+        self.trip_data = (
+            self.__group_triplets()
+            .filter(in_range)
+            .sort_values(by=self.triplet_keys + ['Ritz'])
+            .reset_index(drop=True)
         )
-
-        filtered = grouped.filter(triplet_in_range)
-
-        self.trip_data = filtered.sort_values(
-            by=['lower_conf', 'lower_term', 'upper_conf', 'upper_term', 'Ritz']
-        ).reset_index(drop=True)
-
-        if len(self.trip_data) % 3 != 0:
-            print("Warning: missing rows - range does not fully cover triplets!")
-
-        return self.trip_data
 
     def __filter_by_J(self):
 
         """
         Choose transitions with J > 0.5 only
         """
-        self.trip_data = self.trip_data[self.trip_data['lower_J'] > 0.5]
+        self.trip_data = (
+        self.__group_triplets()
+        .filter(lambda g: (g['lower_J'] > 0.5).all())
+        .reset_index(drop=True)
+    )
 
-    def __filter_by_spectral_resolution(self, min_sep: float = 0.8):
+    def __filter_by_spectral_resolution(self, min_sep: float):
 
         """
         Removes triplets for which the maximum pair of differences is <= min_sep
@@ -290,20 +308,18 @@ class NIST_data:
         Args:
             min_sep (float) : wavelength separation in angstroms
         """
-        bad_idx = []
-        for i in range(0, len(self.trip_data) - 2, 3):
-            l1 = float(self.trip_data.iloc[i]['Ritz'])
-            l2 = float(self.trip_data.iloc[i+1]['Ritz'])
-            l3 = float(self.trip_data.iloc[i+2]['Ritz'])
-            diffs = [abs(l1 - l2), abs(l1 - l3), abs(l2 - l3)]
-            
-            if max(diffs) <= min_sep:
-                bad_idx.extend([i, i+1, i+2])
+        def good(g):
+            wl = g['Ritz'].values
+            diffs = [abs(wl[i] - wl[j]) for i in range(3) for j in range(i+1, 3)]
+            return max(diffs) > min_sep
 
-        if bad_idx:
-            self.trip_data = self.trip_data.drop(self.trip_data.index[bad_idx]).reset_index(drop=True)
+        self.trip_data = (
+            self.__group_triplets()
+            .filter(good)
+            .reset_index(drop=True)
+        )
 
-    def __filter_metastable_states(self, factor: float = 100.0):
+    def __filter_metastable_states(self, factor: float):
 
         """
         Keeps triplets only if the lower level can be considered metastable.
@@ -317,41 +333,32 @@ class NIST_data:
         Args:
             factor (float) : Sets the threshold in A
         """
-        bad_idx = []
-        for d in range(0, len(self.trip_data) - 2, 3):
-            lower_conf = self.trip_data.iloc[d]['lower_conf']
-            lower_term = self.trip_data.iloc[d]['lower_term']
-            lower_J = self.trip_data.iloc[d]['lower_J']
+        def is_metastable(g):
+
+            row = g.iloc[0]
 
             mask = (
-                (self.full_data['upper_conf'] == lower_conf) &
-                (self.full_data['upper_term'] == lower_term) &
-                (self.full_data['upper_J']    == lower_J)
+                (self.full_data['upper_conf'] == row['lower_conf']) &
+                (self.full_data['upper_term'] == row['lower_term']) &
+                (self.full_data['upper_J']    == row['lower_J'])
             )
 
-            ground = self.full_data[mask]
+            decay_channels = self.full_data[mask]
 
-            if ground.empty:
-                print(
-                    f"No ground line found for state\t{lower_conf} {lower_term} {lower_J}!"
-                    " Triplet will be omitted."
-                )
-                bad_idx.extend([d, d+1, d+2])
-                continue
+            if decay_channels.empty:
+                return False
 
-            max_ground_A = ground['Aud'].dropna().astype(float).max() if not ground['Aud'].dropna().empty else 0.0
+            total_A_down = decay_channels['Aud'].fillna(0).astype(float).sum()
 
-            trip_A_sum = (
-                float(self.trip_data.iloc[d]['Aud'] if not pd.isna(self.trip_data.iloc[d]['Aud']) else 0.0) +
-                float(self.trip_data.iloc[d+1]['Aud'] if not pd.isna(self.trip_data.iloc[d+1]['Aud']) else 0.0) +
-                float(self.trip_data.iloc[d+2]['Aud'] if not pd.isna(self.trip_data.iloc[d+2]['Aud']) else 0.0)
-            )
+            trip_A_sum = g['Aud'].fillna(0).astype(float).sum()
 
-            if max_ground_A > factor * max(trip_A_sum, 1e-20):
-                bad_idx.extend([d, d+1, d+2])
+            return total_A_down < factor * trip_A_sum
 
-        if bad_idx:
-            self.trip_data = self.trip_data.drop(self.trip_data.index[bad_idx]).reset_index(drop=True)   
+        self.trip_data = (
+            self.__group_triplets()
+            .filter(is_metastable)
+            .reset_index(drop=True)
+        )   
 
     def __str_to_float(self, s):
 
@@ -379,6 +386,17 @@ class NIST_data:
         else:
             return float(s)
 
+    def __clear_titles(self):
+
+        """
+        In NIST there may be data such that the column names
+        are repeated not only at the beginning, but also in
+        some other row of the table
+        (for example FeII with wavelength_type='air+vac')
+        """
+
+        self.raw_data = self.raw_data[self.raw_data['Ritz'] != 'Ritz']
+
     def save_full(self):
 
         """
@@ -399,15 +417,21 @@ class NIST_data:
         Saves triplets found that are subjected to alaignment effect
         """
         if not self.to_save:
-            print("Noting to save!")
+            print("Nothing to save!")
             return
         
         if self.trip_data.empty:
-            print("Noting to save!")
+            print("Nothing to save!")
             return
 
-        self.trip_data.to_csv(f"triplets_data_{self.line}.dat", sep = "\t", index = False, na_rep = 'NaN')
-        print("Triplets saved")
+        self.trip_data.sort_values(
+        by=self.triplet_keys + ['Ritz']
+        ).to_csv(
+            f"triplets_data_{self.line}.dat",
+            sep="\t",
+            index=False,
+            na_rep='NaN'
+        )
 
     def save_triplets_formated(self):
 
@@ -417,14 +441,15 @@ class NIST_data:
         """
 
         if not self.to_save:
-            print("Noting to save!")
+            print("Nothing to save!")
             return
 
         if self.trip_data.empty:
-            print("Noting to save!")
+            print("Nothing to save!")
             return
         
         with open(f"triplets_data_{self.line}.dat", "w") as file:
+
             df = self.trip_data.copy()
 
             df["E_d(eV)-E_u(eV)"] = df["Ed"].astype(str) + "-" + df["Eu"].astype(str)
@@ -442,32 +467,188 @@ class NIST_data:
                 for col in columns
             ]
 
+            
             header_line = "".join(col.ljust(width) for col, width in zip(columns, widths))
             file.write(header_line + "\n")
             file.write("-" * len(header_line) + "\n")
 
-            for i in range(0, len(df) - 2, 3):
-                for j in [i, i + 1, i + 2]:
-                    l = df.iloc[j]
-                    values = [str(l[col]) for col in columns]
+            
+            df = df.sort_values(by=self.triplet_keys + ['Ritz'])
+
+            
+            for _, group in df.groupby('triplet_id'):
+
+                group = group.sort_values('Ritz')
+
+                for _, row in group.iterrows():
+                    values = [str(row[col]) for col in columns]
                     line = "".join(v.ljust(w) for v, w in zip(values, widths))
                     file.write(line + "\n")
+
                 file.write("\n")
-                    
+    
+    def inspect_lower_level_decay(self, lower_conf: str, lower_term: str, lower_J: float, top_n: int = 20):
+
+        """
+        Prints all radiative decay channels for a given lower level
+        belonging to a selected triplet.
+
+        This method is intended for validation of metastability
+        assumptions used in triplet selection.
+
+        Parameters
+        ----------
+        lower_conf : str
+            Electron configuration of the lower level (e.g. '3d6.(3F2).4s')
+        lower_term : str
+            Term symbol of the lower level (e.g. 'b 4F')
+        lower_J : float
+            Total angular momentum J of the lower level
+        top_n : int, optional
+            Number of strongest decay channels to display (sorted by A coefficient)
+
+        Returns
+        -------
+        pandas.DataFrame
+            Table of all found decay channels sorted by Einstein A coefficient
+
+        Output
+        ------
+        Prints a formatted list of all transitions where the selected level
+        acts as an upper level (i.e. all radiative decay channels).
+
+        Notes
+        -----
+        - This includes all transitions present in the loaded NIST dataset
+          within the queried wavelength range.
+        - Missing transitions outside the dataset are NOT accounted for.
+        - Useful for assessing metastability assumptions used in triplet filtering.
+        """
+
+        mask = (
+            (self.full_data['upper_conf'] == lower_conf) &
+            (self.full_data['upper_term'] == lower_term) &
+            (self.full_data['upper_J']    == lower_J)
+        )
+
+        decay = self.full_data[mask].copy()
+
+        if decay.empty:
+            print("\nNo decay channels found for this level in current dataset.")
+            return decay
+
+        decay = decay.sort_values(by='Aud', ascending=False)
+
+        print("\n" + "=" * 90)
+        print(f"Decay channels for level: {lower_conf} | {lower_term} | J={lower_J}")
+        print("=" * 90)
+
+        cols = ['Ritz', 'Aud', 'fdu', 'lower_conf', 'lower_term', 'lower_J',
+                'upper_conf', 'upper_term', 'upper_J', 'type']
+
+        for i, row in decay.head(top_n).iterrows():
+
+            A = pd.to_numeric(row['Aud'], errors='coerce')
+            f = pd.to_numeric(row['fdu'], errors='coerce')
+
+            A_str = f"{A:.3e}" if pd.notna(A) else "NaN"
+            f_str = f"{f:.3e}" if pd.notna(f) else "NaN"
+
+            print(
+                f"λ={row['Ritz']:.5f} A | "
+                f"A={A_str} | "
+                f"f={f_str} | "
+                f"{row['upper_conf']} {row['upper_term']} J={row['upper_J']} → "
+                f"{row['lower_conf']} {row['lower_term']} J={row['lower_J']} | "
+                f"{row['type']}"
+            )
+
+        print("=" * 90)
+        print(f"Total channels found: {len(decay)}")
+        print(f"Total A (approx lifetime inverse): {decay['Aud'].fillna(0).astype(float).sum():.3e}")
+        print("=" * 90)
+
+        return decay
+
+
+def consider_many_elements():
+    """
+    Searches for triplets subject to alignment effect for all relevant chemical elements
+    """
+
+    elements = [
+    "H", "He",
+    "Li", "Be", "B", "C", "N", "O", "F", "Ne",
+    "Na", "Mg", "Al", "Si", "P", "S", "Cl", "Ar",
+    "K", "Ca",
+    "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
+    "Ga", "Ge", "As", "Se", "Br", "Kr",
+    "Rb", "Sr", "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd",
+    "Ag", "Cd", "In", "Sn"]
+
+    ion_states = ["I", "II", "III", "IV"] 
+
+    for el in elements:
+        for ion in ion_states:
+
+            linename = f"{el} {ion}"
+
+            try:
+                print(f"\nProcessing {linename}")
+
+                data = NIST_data(
+                    linename=linename,
+                    lambda1=1e-6,
+                    lambda2=35e7,
+                    in_vacuum=True,
+                    sort_lambda1=1000,
+                    sort_lambda2=15000,
+                    meta_factor=100.0
+                )
+
+                if data.to_save:
+                    data.save_triplets_formated()
+
+            except Exception as e:
+                print(f"Failed for {linename}: {e}")
 
 
 def main():
 
     """
-    Example usage of the NIST_data class for helium atom and carbor ion.
+    Example usage of the NIST_data class for helium atom and iron ion.
     """
 
-    data = NIST_data('He I', 300, 35e6)
+    # Fe II
+    data = NIST_data(linename ='Fe II',
+                     lambda1 = 1e-6,
+                     lambda2 = 35e7,
+                     in_vacuum = False,
+                     sort_lambda1 = 4000,
+                     sort_lambda2 = 15000,
+                     meta_factor = 100.0)
+    
     data.save_triplets_formated()
 
-    data = NIST_data('C II', 300, 35e6)
+    data.inspect_lower_level_decay("3d6.(3F2).4s",
+                                   "b 4F",
+                                   1.5)
+
+    # He I
+    data = NIST_data(linename ='He I',
+                     lambda1 = 1e-6,
+                     lambda2 = 35e7,
+                     in_vacuum = False,
+                     sort_lambda1 = 5000,
+                     sort_lambda2 = 15000,
+                     meta_factor = 100.0)
+    
     data.save_triplets_formated()
 
+    data.inspect_lower_level_decay("1s.2s",
+                                   "3S",
+                                   1.0)
 
 if __name__ == '__main__':
-    main()
+    consider_many_elements()
+    #main()
