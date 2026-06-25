@@ -4,9 +4,14 @@
 !.gitignore
 !*.py
 !*.md
+!*.png
 
 # include entire folder "lines_found" with all contents
-!lines_found_air/
-!lines_found_air/**
-!lines_found_vacuum/
-!lines_found_vacuum/**
+!assets/
+!assets/**
+!star_data/
+!star_data/**
+#!lines_found_air/
+#!lines_found_air/**
+#!lines_found_vacuum/
+#!lines_found_vacuum/**

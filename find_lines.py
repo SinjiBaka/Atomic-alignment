@@ -4,6 +4,20 @@ import numpy as np
 from astroquery.nist import Nist
 import astropy.units as u
 
+from star_data.stellar_systems import stellar_systems
+
+# ---------- CGS constants ----------
+
+c   = 2.99792458e10      # cm/s
+h   = 6.62607015e-27     # erg s
+k_B = 1.380649e-16       # erg/K
+
+e   = 4.803204712e-10    # statC
+m_e = 9.10938356e-28     # g
+
+AU   = 1.495978707e13    # cm
+Rsun = 6.957e10          # cm
+
 
 
 class NIST_data:
@@ -14,10 +28,12 @@ class NIST_data:
     subject to atomic alignment.
 
     Conditions for the alignment effect:
+
+    TODO: add new conditions
+
         1. The lower level must be metastable, i.e., transitions from it
            must be only forbidden, or the relaxation time of the level must
-           differ by several orders of magnitude compared to the relaxation
-           time of the triplet lines.
+           differ by several orders of magnitude compared to the photoexcitation time of this level.
         2. The upper sublevels must have the same electron configuration
             and the same term, but differ in their J moments.
         3. The search range for lines is 500 - 1500 nm (depends on telescope choosen).
@@ -38,8 +54,8 @@ class NIST_data:
     """
 
     def __init__(self, linename : str, lambda1 : float, lambda2 : float, in_vacuum : bool = True,
-                 sort_lambda1 : float = 5000.0, sort_lambda2 : float = 15000.0, meta_factor : float = 100.0,
-                  wavelength_sep : float = 0.8 ):
+                 sort_lambda1 : float = 5000.0, sort_lambda2 : float = 15000.0,
+                  wavelength_sep : float = 0.8, system_name : str = "Sun", use_planck : bool = False):
 
         """
         Performs all the basic steps of parsing and filtering
@@ -61,9 +77,11 @@ class NIST_data:
             lambda2 (float) : wavelength to end filtering with 
             meta_factor (float) :  sets the threshold in A for checking metastability
             wavelength_sep (float) : wavelength separation between any triplet lines in Angstroms
+            system_name (str) : name of the stellar system to be considered for photoexcitation rate
         """
 
         self.line = linename
+        self.system_name = system_name
 
         if in_vacuum:
             wavelength_type = 'vacuum'
@@ -75,7 +93,6 @@ class NIST_data:
                                  wavelength_type = wavelength_type)
         
         self.raw_data = nist_table.to_pandas()
-        print(len(self.raw_data))
         
         self.to_save = True
         if self.raw_data['Ritz'].isna().all():
@@ -110,7 +127,16 @@ class NIST_data:
         self.__filter_by_wavelength(sort_lambda1, sort_lambda2)
         self.__filter_by_J()
         self.__filter_by_spectral_resolution(wavelength_sep)
-        self.__filter_metastable_states(factor = meta_factor)
+        self.__build_decay_cache()
+        self.evaluate_alignment_criteria(use_planck=use_planck)
+
+        self.trip_data = self.trip_data.merge(
+        self.triplet_metrics,
+        on="triplet_id",
+        how="left"
+        )
+
+        self.sort_triplets_by_alignment()
 
         print(f"Data fitered, found {int(len(self.trip_data)/3)} lines")
 
@@ -397,6 +423,295 @@ class NIST_data:
 
         self.raw_data = self.raw_data[self.raw_data['Ritz'] != 'Ritz']
 
+    def __photoexcitation_rate(self, wavelength_A: float, f_value: float, system, use_planck: bool = False):
+
+        """
+        Photoexcitation rate for transition a -> u.
+
+        Parameters
+        ----------
+        wavelength_A : float
+            Transition wavelength [Angstrom]
+
+        f_value : float
+            Oscillator strength
+
+        system : StellarSystem
+            Stellar system structure
+
+        use_planck : bool
+            Force use of blackbody spectrum
+
+        Returns
+        -------
+        float
+            Excitation rate [s^-1]
+        """
+
+        lambda_cm = wavelength_A * 1e-8
+        nu0 = c / lambda_cm
+
+        # use given spectrum or blackbody
+        if (not use_planck
+                and system.spectrum_wl is not None
+                and system.spectrum_flux is not None):
+
+            # spectrum assumed at planetary orbit
+            F_lambda = np.interp(
+                wavelength_A,
+                system.spectrum_wl,
+                system.spectrum_flux
+            )
+            
+        else:
+
+            exponent = h*c / (lambda_cm * k_B * system.Teff)
+
+            B_lambda = 2 * h * c**2 / lambda_cm**5 / (np.exp(exponent) - 1)
+            
+            F_lambda_surface = np.pi * B_lambda
+
+            Rstar_cm = system.Rstar_Rsun * Rsun
+            orbit_cm = system.orbital_distance_AU * AU
+
+            F_lambda = F_lambda_surface * (Rstar_cm / orbit_cm)**2
+
+            # cm^-1 -> A^-1
+            F_lambda *= 1e-8
+
+        F_nu = F_lambda * lambda_cm**2 / c * 1e8
+
+        # Mean intensity
+        J_nu = F_nu / (4.0 * np.pi)
+
+        # Einstein B coefficient
+        B_au = np.pi * e**2 / (m_e * c * h * nu0) * f_value
+
+        # Excitation rate
+        R = B_au * J_nu
+
+        return R
+
+    def __level_decay_rate(self, conf, term, J):
+
+        """
+        Total spontaneous decay rate of a level.
+
+        Returns
+        -------
+        Gamma : float
+            Sum of all A(level -> lower states)
+        """
+
+        key = (conf, term, J)
+
+        data = self.decay_cache.get(key)
+
+        if data is None:
+            return 0.0
+
+        return data["A_total"]
+
+    def __branching_ratio(self, upper_conf, upper_term, upper_J, lower_conf, lower_term, lower_J):
+
+        """
+        Branching ratio beta_i.
+
+        beta_i = A(u_i -> a) / sum_k A(u_i -> k)
+        """
+
+        upper_key = (upper_conf, upper_term, upper_J)
+
+        lower_key = (lower_conf, lower_term,  lower_J)
+
+        data = self.decay_cache.get(upper_key)
+
+        if data is None:
+            return np.nan
+
+        A_total = data["A_total"]
+
+        if A_total <= 0:
+            return np.nan
+
+        A_return = data["returns"].get(lower_key, 0.0)
+
+        return A_return / A_total    
+
+    def __build_decay_cache(self):
+
+        """
+        Precompute all radiative decays.
+
+        Cache structure:
+
+        self.decay_cache[
+            (conf, term, J)
+        ] = {
+            "A_total": ...,
+            "returns": {
+                (lower_conf, lower_term, lower_J): A_return
+            }
+        }
+        """
+
+        self.decay_cache = {}
+
+        grouped = self.full_data.groupby(
+            ["upper_conf", "upper_term", "upper_J"],
+            sort=False
+        )
+
+        for key, group in grouped:
+
+            A_total = group["Aud"].astype(float).sum()
+
+            returns = {}
+
+            for _, row in group.iterrows():
+
+                lower_key = (
+                    row["lower_conf"],
+                    row["lower_term"],
+                    row["lower_J"]
+                )
+
+                returns[lower_key] = (
+                    returns.get(lower_key, 0.0)
+                    + float(row["Aud"])
+                )
+
+            self.decay_cache[key] = {
+                "A_total": A_total,
+                "returns": returns
+            }
+
+    def evaluate_alignment_criteria(self, use_planck = False):
+
+        """
+        Calculates all alignment criteria for every triplet.
+
+        Adds columns:
+
+        Gamma_a
+        Rexc
+        Q
+
+        beta1 beta2 beta3
+
+        Rcyc
+        Qcyc
+        """
+
+        system = stellar_systems[self.system_name]
+
+        rows = []
+
+        for triplet_id, g in self.__group_triplets():
+
+            g = g.sort_values("Ritz")
+
+            first = g.iloc[0]
+
+            lower_conf = first["lower_conf"]
+            lower_term = first["lower_term"]
+            lower_J    = first["lower_J"]
+
+            Gamma_a = self.__level_decay_rate(
+                lower_conf,
+                lower_term,
+                lower_J
+            )
+
+            R_list = []
+            beta_list = []
+
+            for _, row in g.iterrows():
+                
+                f_value = abs(float(row["fdu"]))
+
+                if f_value <= 0:
+                    R = 0.0
+                else:
+                    R = self.__photoexcitation_rate(
+                        wavelength_A=row["Ritz"],
+                        f_value = f_value,
+                        system=system,
+                        use_planck=use_planck
+                    )
+
+                beta = self.__branching_ratio(
+                    upper_conf=row["upper_conf"],
+                    upper_term=row["upper_term"],
+                    upper_J=row["upper_J"],
+                    lower_conf=lower_conf,
+                    lower_term=lower_term,
+                    lower_J=lower_J
+                )
+
+                R_list.append(R)
+                beta_list.append(0.0 if np.isnan(beta) else beta)
+
+            Rexc = np.sum(R_list)
+
+            if Gamma_a > 0:
+                Q = Rexc / Gamma_a
+            else:
+                Q = np.inf
+
+            Rcyc = np.sum(np.array(R_list) * np.array(beta_list))
+
+            if Gamma_a > 0:
+                Qcyc = Rcyc / Gamma_a
+            else:
+                Qcyc = np.inf
+
+            rows.append({
+                "triplet_id": triplet_id,
+                "Gamma_a": Gamma_a,
+                "Rexc": Rexc,
+                "Q": Q,
+                "beta1": beta_list[0],
+                "beta2": beta_list[1],
+                "beta3": beta_list[2],
+                "Rcyc": Rcyc,
+                "Qcyc": Qcyc
+            })
+
+        self.triplet_metrics = pd.DataFrame(rows)
+
+        self.triplet_metrics = (
+            self.triplet_metrics
+            .sort_values("Qcyc", ascending=False)
+            .reset_index(drop=True)
+        )
+
+    def sort_triplets_by_alignment(self):
+
+        """
+        Sort triplets by decreasing Qcyc.
+        """
+
+        order = (
+            self.triplet_metrics
+            .sort_values("Qcyc", ascending=False)
+            ["triplet_id"]
+            .values
+        )
+
+        mapper = {tid: i for i, tid in enumerate(order)}
+
+        self.trip_data["sort_order"] = (
+            self.trip_data["triplet_id"].map(mapper)
+        )
+
+        self.trip_data = (
+            self.trip_data
+            .sort_values(["sort_order", "Ritz"])
+            .drop(columns="sort_order")
+            .reset_index(drop=True)
+        )
+
     def save_full(self):
 
         """
@@ -436,8 +751,13 @@ class NIST_data:
     def save_triplets_formated(self):
 
         """
-        Saves triplets found that are subjected to alaignment effect
-        in more readable form
+        Saves found triplets in a human-readable form.
+
+        Triplets are written in the order determined by Qcyc
+        (best alignment candidates first).
+
+        For every triplet, alignment criteria are printed
+        before the three transition lines.
         """
 
         if not self.to_save:
@@ -447,19 +767,36 @@ class NIST_data:
         if self.trip_data.empty:
             print("Nothing to save!")
             return
-        
+
         with open(f"triplets_data_{self.line}.dat", "w") as file:
 
             df = self.trip_data.copy()
 
-            df["E_d(eV)-E_u(eV)"] = df["Ed"].astype(str) + "-" + df["Eu"].astype(str)
-            df["g_d-g_u"] = df["gd"].astype(str) + "-" + df["gu"].astype(str)
+            df["E_d(eV)-E_u(eV)"] = (
+                df["Ed"].astype(str)
+                + "-"
+                + df["Eu"].astype(str)
+            )
+
+            df["g_d-g_u"] = (
+                df["gd"].astype(str)
+                + "-"
+                + df["gu"].astype(str)
+            )
 
             columns = [
-                "Ritz", "Aud", "fdu", "E_d(eV)-E_u(eV)",
-                "lower_conf", "lower_term", "lower_J",
-                "upper_conf", "upper_term", "upper_J",
-                "g_d-g_u", "type"
+                "Ritz",
+                "Aud",
+                "fdu",
+                "E_d(eV)-E_u(eV)",
+                "lower_conf",
+                "lower_term",
+                "lower_J",
+                "upper_conf",
+                "upper_term",
+                "upper_J",
+                "g_d-g_u",
+                "type"
             ]
 
             widths = [
@@ -467,25 +804,87 @@ class NIST_data:
                 for col in columns
             ]
 
-            
-            header_line = "".join(col.ljust(width) for col, width in zip(columns, widths))
+            header_line = "".join(
+                col.ljust(width)
+                for col, width in zip(columns, widths)
+            )
+
             file.write(header_line + "\n")
-            file.write("-" * len(header_line) + "\n")
+            file.write("-" * len(header_line) + "\n\n")
 
-            
-            df = df.sort_values(by=self.triplet_keys + ['Ritz'])
+            rank = 1
 
-            
-            for _, group in df.groupby('triplet_id'):
+            for triplet_id, group in df.groupby("triplet_id", sort=False):
 
-                group = group.sort_values('Ritz')
+                group = group.sort_values("Ritz")
+
+                first = group.iloc[0]
+
+                file.write("=" * 120 + "\n")
+
+                file.write(
+                    f"Rank #{rank}    "
+                    f"Triplet #{triplet_id}\n"
+                )
+
+                file.write(
+                    f"Qcyc = {first['Qcyc']:.3e}    "
+                    f"Q = {first['Q']:.3e}\n"
+                )
+
+                file.write(
+                    f"Rcyc = {first['Rcyc']:.3e} s^-1    "
+                    f"Rexc = {first['Rexc']:.3e} s^-1    "
+                    f"Gamma_a = {first['Gamma_a']:.3e} s^-1\n"
+                )
+
+                file.write(
+                    f"beta = ["
+                    f"{first['beta1']:.3f}, "
+                    f"{first['beta2']:.3f}, "
+                    f"{first['beta3']:.3f}"
+                    f"]\n"
+                )
+
+                file.write("-" * 120 + "\n")
 
                 for _, row in group.iterrows():
-                    values = [str(row[col]) for col in columns]
-                    line = "".join(v.ljust(w) for v, w in zip(values, widths))
+
+                    values = []
+
+                    for col in columns:
+
+                        value = row[col]
+
+                        if isinstance(value, float):
+
+                            if col == "Ritz":
+                                values.append(f"{value:.5f}")
+
+                            elif col in ["Aud", "fdu"]:
+                                values.append(f"{value:.3e}")
+
+                            else:
+                                values.append(str(value))
+
+                        else:
+                            values.append(str(value))
+
+                    line = "".join(
+                        value.ljust(width)
+                        for value, width in zip(values, widths)
+                    )
+
                     file.write(line + "\n")
 
-                file.write("\n")
+                file.write("\n\n")
+
+                rank += 1
+
+        print(
+            f"Saved {int(len(df)/3)} triplets "
+            f"sorted by decreasing Qcyc"
+        )
     
     def inspect_lower_level_decay(self, lower_conf: str, lower_term: str, lower_J: float, top_n: int = 20):
 
@@ -571,84 +970,3 @@ class NIST_data:
         return decay
 
 
-def consider_many_elements():
-    """
-    Searches for triplets subject to alignment effect for all relevant chemical elements
-    """
-
-    elements = [
-    "H", "He",
-    "Li", "Be", "B", "C", "N", "O", "F", "Ne",
-    "Na", "Mg", "Al", "Si", "P", "S", "Cl", "Ar",
-    "K", "Ca",
-    "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
-    "Ga", "Ge", "As", "Se", "Br", "Kr",
-    "Rb", "Sr", "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd",
-    "Ag", "Cd", "In", "Sn"]
-
-    ion_states = ["I", "II", "III", "IV"] 
-
-    for el in elements:
-        for ion in ion_states:
-
-            linename = f"{el} {ion}"
-
-            try:
-                print(f"\nProcessing {linename}")
-
-                data = NIST_data(
-                    linename=linename,
-                    lambda1=1e-6,
-                    lambda2=35e7,
-                    in_vacuum=True,
-                    sort_lambda1=1000,
-                    sort_lambda2=15000,
-                    meta_factor=100.0
-                )
-
-                if data.to_save:
-                    data.save_triplets_formated()
-
-            except Exception as e:
-                print(f"Failed for {linename}: {e}")
-
-
-def main():
-
-    """
-    Example usage of the NIST_data class for helium atom and iron ion.
-    """
-
-    # Fe II
-    data = NIST_data(linename ='Fe II',
-                     lambda1 = 1e-6,
-                     lambda2 = 35e7,
-                     in_vacuum = False,
-                     sort_lambda1 = 4000,
-                     sort_lambda2 = 15000,
-                     meta_factor = 100.0)
-    
-    data.save_triplets_formated()
-
-    data.inspect_lower_level_decay("3d6.(3F2).4s",
-                                   "b 4F",
-                                   1.5)
-
-    # He I
-    data = NIST_data(linename ='He I',
-                     lambda1 = 1e-6,
-                     lambda2 = 35e7,
-                     in_vacuum = False,
-                     sort_lambda1 = 5000,
-                     sort_lambda2 = 15000,
-                     meta_factor = 100.0)
-    
-    data.save_triplets_formated()
-
-    data.inspect_lower_level_decay("1s.2s",
-                                   "3S",
-                                   1.0)
-
-if __name__ == '__main__':
-    consider_many_elements()
-    #main()
