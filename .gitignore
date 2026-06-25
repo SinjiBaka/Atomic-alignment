@@ -11,6 +11,8 @@
 !assets/**
 !star_data/
 !star_data/**
+!results/
+!results/**
 #!lines_found_air/
 #!lines_found_air/**
 #!lines_found_vacuum/

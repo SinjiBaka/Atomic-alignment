@@ -33,8 +33,8 @@ def consider_many_elements():
                     in_vacuum=True,
                     sort_lambda1=1000,
                     sort_lambda2=15000,
-                    meta_factor=100.0
-                )
+                    system_name="Sun",
+                    use_planck = True)
 
                 if data.to_save:
                     data.save_triplets_formated()
