@@ -69,6 +69,8 @@ Physically, $R_{\mathrm{cyc}}$ represents the number of times per second that an
 
 Consequently, a transition can be considered quasi-isolated only if all of the conditions described above are satisfied simultaneously.
 
+Some precomputed results for different stars can be found in the `results` directory. For each star, two sets of results are provided: one obtained using a Planck spectrum (`sun_planck_vacuum/...`) and another using a model stellar spectrum (`sun_vacuum/...`). All wavelengths are given in vacuum, following the NIST convention.
+
 ---
 
 ## Features
@@ -82,6 +84,10 @@ Consequently, a transition can be considered quasi-isolated only if all of the c
   - spectral separations \( > 0.8 \) Å (variable)
   - metastable lower levels (based on Einstein A-coefficients and photoexcitation rates)
 - Exports full datasets or filtered triplets to tab-separated files
+
+**Important notes**
+
+Some potentially suitable transitions may be missed because, for certain elements, the NIST Atomic Spectra Database does not provide the required $A_{ik}$ and $f_{ik}$ coefficients. In such cases, the decay rates of the corresponding levels cannot be determined reliably, making it impossible to evaluate the selection criteria described above. These transitions are therefore excluded from consideration. However, if the missing data correspond to the ground state of the ion, the level is recorded
 
 ---
 

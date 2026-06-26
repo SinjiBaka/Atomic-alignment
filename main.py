@@ -31,10 +31,10 @@ def consider_many_elements():
                     lambda1=1e-6,
                     lambda2=35e7,
                     in_vacuum=True,
-                    sort_lambda1=1000,
+                    sort_lambda1=500,
                     sort_lambda2=15000,
                     system_name="Sun",
-                    use_planck = True)
+                    use_planck = False)
 
                 if data.to_save:
                     data.save_triplets_formated()
@@ -54,16 +54,16 @@ def main():
                      lambda1 = 1e-6,
                      lambda2 = 35e7,
                      in_vacuum = False,
-                     sort_lambda1 = 400,
-                     sort_lambda2 = 1500,
+                     sort_lambda1 = 1000,
+                     sort_lambda2 = 15000,
                      system_name="Sun",
                      use_planck = True)
     
     data.save_triplets_formated()
 
-    # data.inspect_lower_level_decay("3d6.(3F2).4s",
-    #                                "b 4F",
-    #                                1.5)
+    data.inspect_lower_level_decay("3d6.(3F2).4s",
+                                   "b 4F",
+                                   1.5)
 
     #He I
     data = NIST_data(linename ='He I',
@@ -77,9 +77,9 @@ def main():
     
     data.save_triplets_formated()
 
-    # data.inspect_lower_level_decay("1s.2s",
-    #                                "3S",
-    #                                1.0)
+    data.inspect_lower_level_decay("1s.2s",
+                                   "3S",
+                                   1.0)
 
 if __name__ == '__main__':
     #consider_many_elements()

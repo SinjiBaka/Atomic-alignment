@@ -104,8 +104,14 @@ class NIST_data:
 
         print(f"\nLoaded\t{len(self.raw_data)} rows for {self.line}")
         
+        # do it before dropna() because E1 type missed by default in database
         self.__define_transition_type()
+
+        # check how much values are missed in database
+        print(f"Missed Aki num = {self.raw_data["Aki"].isna().sum()}")
+        print(f"Missed fki num = {self.raw_data["fik"].isna().sum()}")
         self.raw_data = self.raw_data.dropna()
+
         self.__clear_titles()
         self.__Ritz_to_float()
         self.__parse_energies()
@@ -628,7 +634,7 @@ class NIST_data:
 
             for _, row in g.iterrows():
                 
-                f_value = abs(float(row["fdu"]))
+                f_value = float(row["fdu"])
 
                 if f_value <= 0:
                     R = 0.0
@@ -768,49 +774,79 @@ class NIST_data:
             print("Nothing to save!")
             return
 
+        df = self.trip_data.copy()
+
+        df["E_d(eV)-E_u(eV)"] = (
+            df["Ed"].astype(str)
+            + "-"
+            + df["Eu"].astype(str)
+        )
+
+        df["g_d-g_u"] = (
+            df["gd"].astype(str)
+            + "-"
+            + df["gu"].astype(str)
+        )
+
+        columns = [
+            "Ritz",
+            "Aud",
+            "fdu",
+            "E_d(eV)-E_u(eV)",
+            "lower_conf",
+            "lower_term",
+            "lower_J",
+            "upper_conf",
+            "upper_term",
+            "upper_J",
+            "g_d-g_u",
+            "type"
+        ]
+
+         # Formatting helper
+        def format_value(value, column):
+
+            if isinstance(value, (float, np.floating)):
+
+                if column == "Ritz":
+                    return f"{value:.5f}"
+
+                elif column in ["Aud", "fdu"]:
+                    return f"{value:.3e}"
+
+                else:
+                    return str(value)
+
+            return str(value)
+
+        # Determine column widths AFTER formatting
+        widths = []
+
+        for col in columns:
+
+            formatted = [
+                format_value(v, col)
+                for v in df[col]
+            ]
+
+            widths.append(
+                max(
+                    len(col),
+                    max(len(s) for s in formatted)
+                ) + 3
+            )
+
+        header = "".join(
+            col.ljust(width)
+            for col, width in zip(columns, widths)
+        )
+
+        saved_triplets = 0
+
         with open(f"triplets_data_{self.line}.dat", "w") as file:
 
-            df = self.trip_data.copy()
-
-            df["E_d(eV)-E_u(eV)"] = (
-                df["Ed"].astype(str)
-                + "-"
-                + df["Eu"].astype(str)
-            )
-
-            df["g_d-g_u"] = (
-                df["gd"].astype(str)
-                + "-"
-                + df["gu"].astype(str)
-            )
-
-            columns = [
-                "Ritz",
-                "Aud",
-                "fdu",
-                "E_d(eV)-E_u(eV)",
-                "lower_conf",
-                "lower_term",
-                "lower_J",
-                "upper_conf",
-                "upper_term",
-                "upper_J",
-                "g_d-g_u",
-                "type"
-            ]
-
-            widths = [
-                max(df[col].astype(str).map(len).max(), len(col)) + 2
-                for col in columns
-            ]
-
-            header_line = "".join(
-                col.ljust(width)
-                for col, width in zip(columns, widths)
-            )
-
-            file.write(header_line + "\n")
-            file.write("-" * len(header_line) + "\n\n")
+            file.write(header + "\n")
+            file.write("-" * len(header) + "\n\n")
 
             rank = 1
 
@@ -819,6 +855,14 @@ class NIST_data:
                 group = group.sort_values("Ritz")
 
                 first = group.iloc[0]
+
+                # Skip triplets with unknown decay rate.
+                # Keep true ground states only.
+                if (
+                    first["Gamma_a"] == 0.0
+                    and abs(first["Ed"]) > 1e-6
+                ):
+                    continue
 
                 file.write("=" * 120 + "\n")
 
@@ -850,25 +894,10 @@ class NIST_data:
 
                 for _, row in group.iterrows():
 
-                    values = []
-
-                    for col in columns:
-
-                        value = row[col]
-
-                        if isinstance(value, float):
-
-                            if col == "Ritz":
-                                values.append(f"{value:.5f}")
-
-                            elif col in ["Aud", "fdu"]:
-                                values.append(f"{value:.3e}")
-
-                            else:
-                                values.append(str(value))
-
-                        else:
-                            values.append(str(value))
+                    values = [
+                        format_value(row[col], col)
+                        for col in columns
+                    ]
 
                     line = "".join(
                         value.ljust(width)
@@ -879,12 +908,13 @@ class NIST_data:
 
                 file.write("\n\n")
 
+                saved_triplets += 1
                 rank += 1
 
         print(
-            f"Saved {int(len(df)/3)} triplets "
+            f"Saved {saved_triplets} triplets "
             f"sorted by decreasing Qcyc"
-        )
+        )    
     
     def inspect_lower_level_decay(self, lower_conf: str, lower_term: str, lower_J: float, top_n: int = 20):
 
