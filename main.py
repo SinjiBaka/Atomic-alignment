@@ -33,7 +33,7 @@ def consider_many_elements():
                     in_vacuum=True,
                     sort_lambda1=500,
                     sort_lambda2=15000,
-                    system_name="Sun",
+                    system_name="GJ 436",
                     use_planck = False)
 
                 if data.to_save:
